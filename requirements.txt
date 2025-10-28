@@ -1,0 +1,9 @@
+google-generativeai
+beautifulsoup4
+requests
+pandas
+openpyxl
+python-docx
+PyPDF2
+selenium
+webdriver-manager
