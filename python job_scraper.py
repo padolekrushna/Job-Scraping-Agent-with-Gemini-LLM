@@ -15,16 +15,23 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 from docx import Document
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class JobScrapingAgent:
-    def __init__(self, gemini_api_key):
+    def __init__(self, gemini_api_key=None):
         """Initialize the job scraping agent with Gemini API key"""
-        self.gemini_api_key = gemini_api_key
-        genai.configure(api_key=gemini_api_key)
+        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
+        if not self.gemini_api_key:
+            raise ValueError("Gemini API key not found. Please set GEMINI_API_KEY in .env file or pass it directly.")
+        
+        genai.configure(api_key=self.gemini_api_key)
         self.model = genai.GenerativeModel('gemini-pro')
         self.user_skills = []
         self.user_experience = ""
@@ -154,10 +161,7 @@ class JobScrapingAgent:
         driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
         
         try:
-            # Scrape from LinkedIn (simplified - note: LinkedIn has anti-scraping measures)
-            self._scrape_linkedin_jobs(driver, job_title, location, num_pages)
-            
-            # Scrape from Indeed
+            # Scrape from Indeed (LinkedIn scraping is unreliable due to anti-bot measures)
             self._scrape_indeed_jobs(driver, job_title, location, num_pages)
             
         finally:
@@ -165,69 +169,6 @@ class JobScrapingAgent:
             
         logger.info(f"Scraped {len(self.jobs_data)} job listings")
         return self.jobs_data
-    
-    def _scrape_linkedin_jobs(self, driver, job_title, location, num_pages):
-        """Scrape job listings from LinkedIn"""
-        # Note: LinkedIn has strict anti-scraping measures
-        # This is a simplified approach that may not work reliably
-        base_url = "https://www.linkedin.com/jobs/search"
-        params = {
-            "keywords": job_title,
-            "location": location,
-            "f_TPR": "r86400",  # Past 24 hours
-            "position": "1",
-            "pageNum": "0"
-        }
-        
-        # Build URL
-        url = base_url + "?" + "&".join([f"{k}={v}" for k, v in params.items()])
-        logger.info(f"Scraping LinkedIn: {url}")
-        
-        try:
-            driver.get(url)
-            time.sleep(3)
-            
-            for page in range(num_pages):
-                # Scroll to load more jobs
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)
-                
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
-                job_cards = soup.find_all('div', class_='base-card')
-                
-                for card in job_cards:
-                    try:
-                        title_elem = card.find('h3', class_='base-search-card__title')
-                        company_elem = card.find('h4', class_='base-search-card__subtitle')
-                        link_elem = card.find('a', class_='base-card__full-link')
-                        description_elem = card.find('p', class_='job-search-card__snippet')
-                        
-                        if title_elem and link_elem:
-                            job = {
-                                'title': title_elem.text.strip(),
-                                'company': company_elem.text.strip() if company_elem else "N/A",
-                                'link': link_elem['href'],
-                                'description': description_elem.text.strip() if description_elem else "",
-                                'source': 'LinkedIn'
-                            }
-                            self.jobs_data.append(job)
-                    except Exception as e:
-                        logger.warning(f"Error parsing LinkedIn job card: {str(e)}")
-                        continue
-                
-                # Try to go to next page
-                try:
-                    next_button = driver.find_element("xpath", "//button[@aria-label='Next']")
-                    if next_button.is_enabled():
-                        next_button.click()
-                        time.sleep(3)
-                    else:
-                        break
-                except:
-                    break
-                    
-        except Exception as e:
-            logger.error(f"Error scraping LinkedIn: {str(e)}")
     
     def _scrape_indeed_jobs(self, driver, job_title, location, num_pages):
         """Scrape job listings from Indeed"""
@@ -247,7 +188,7 @@ class JobScrapingAgent:
             for page in range(num_pages):
                 page_url = f"{url}&start={page * 10}"
                 driver.get(page_url)
-                time.sleep(2)
+                time.sleep(3)  # Increased wait time
                 
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
                 job_cards = soup.find_all('div', class_='job_seen_beacon')
@@ -284,7 +225,7 @@ class JobScrapingAgent:
         except Exception as e:
             logger.error(f"Error scraping Indeed: {str(e)}")
     
-    def filter_relevant_jobs(self, min_relevance_score=0.7):
+    def filter_relevant_jobs(self, min_relevance_score=0.6):
         """Use Gemini to filter jobs relevant to user's resume"""
         logger.info("Filtering relevant jobs using Gemini LLM")
         relevant_jobs = []
@@ -337,8 +278,14 @@ class JobScrapingAgent:
         logger.info(f"Filtered to {len(relevant_jobs)} relevant jobs")
         return relevant_jobs
     
-    def export_to_excel(self, output_path="job_matches.xlsx"):
+    def export_to_excel(self, output_path=None):
         """Export job matches to Excel file"""
+        if output_path is None:
+            output_path = f"output/job_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
         logger.info(f"Exporting jobs to Excel: {output_path}")
         
         # Prepare data for DataFrame
@@ -388,39 +335,81 @@ class JobScrapingAgent:
         return output_path
 
 def main():
-    # Get API key from environment variable or input
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        GEMINI_API_KEY = input("Enter your Google Gemini API key: ").strip()
-    
     # Initialize the agent
-    agent = JobScrapingAgent(GEMINI_API_KEY)
+    agent = JobScrapingAgent()
     
     # Get user inputs
-    resume_path = input("Enter path to your resume (PDF/DOCX): ").strip()
+    print("=== Job Scraping Agent ===")
+    print("Make sure your resume is in the 'resumes' folder")
+    
+    # List available resumes
+    resume_dir = "resumes"
+    if not os.path.exists(resume_dir):
+        os.makedirs(resume_dir)
+        print(f"Created '{resume_dir}' directory. Please add your resume there.")
+        return
+    
+    resume_files = [f for f in os.listdir(resume_dir) if f.endswith(('.pdf', '.docx', '.doc'))]
+    if not resume_files:
+        print(f"No resume files found in '{resume_dir}' directory. Please add your resume (PDF or DOCX).")
+        return
+    
+    print("\nAvailable resumes:")
+    for i, resume in enumerate(resume_files, 1):
+        print(f"{i}. {resume}")
+    
+    while True:
+        try:
+            choice = int(input(f"\nSelect resume (1-{len(resume_files)}): ")) - 1
+            if 0 <= choice < len(resume_files):
+                resume_path = os.path.join(resume_dir, resume_files[choice])
+                break
+            else:
+                print("Invalid selection. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+    
     job_title = input("Enter job title to search for: ").strip()
     location = input("Enter location: ").strip()
+    num_pages = input("Number of pages to scrape (default 2): ").strip()
+    num_pages = int(num_pages) if num_pages.isdigit() else 2
     
     try:
         # Extract resume information
+        print("\nExtracting information from your resume...")
         agent.extract_resume_info(resume_path)
+        print(f"Extracted skills: {', '.join(agent.user_skills[:5])}{'...' if len(agent.user_skills) > 5 else ''}")
         
         # Scrape jobs
-        agent.scrape_jobs(job_title, location, num_pages=2)
+        print(f"\nScraping jobs for '{job_title}' in '{location}'...")
+        agent.scrape_jobs(job_title, location, num_pages=num_pages)
+        
+        if not agent.jobs_data:
+            print("No jobs found. Try different search terms or location.")
+            return
         
         # Filter relevant jobs
+        print("\nAnalyzing job relevance using AI...")
         agent.filter_relevant_jobs(min_relevance_score=0.6)
         
-        # Export to Excel
-        output_file = f"job_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        agent.export_to_excel(output_file)
+        if not agent.jobs_data:
+            print("No relevant jobs found based on your resume.")
+            return
         
-        print(f"\nJob matching complete! Results saved to: {output_file}")
-        print(f"Found {len(agent.jobs_data)} relevant job matches.")
+        # Export to Excel
+        output_file = agent.export_to_excel()
+        
+        print(f"\n✅ Job matching complete!")
+        print(f"📁 Results saved to: {output_file}")
+        print(f"🎯 Found {len(agent.jobs_data)} relevant job matches.")
+        print(f"\nTop 3 matches:")
+        for i, job in enumerate(agent.jobs_data[:3], 1):
+            print(f"{i}. {job['title']} at {job['company']} (Relevance: {job['relevance_score']:.2f})")
         
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
-        print(f"An error occurred: {str(e)}")
+        print(f"\n❌ An error occurred: {str(e)}")
+        print("Check the logs for more details.")
 
 if __name__ == "__main__":
     main()
